@@ -2,13 +2,13 @@
 
 A simple application based on [QtGStreamer](https://gstreamer.freedesktop.org/modules/qt-gstreamer.html) which can play a video and take snapshots.
 
-A simple GStreamer `pipeline` is used, described above:
+The create pipeline is quite simple:
 ```
-                                                  ---------   -----------------
-                                              /-->| queue |-->| autovideosink |
-----------------   -------------   -------   /    --------    -----------------
-| videotestsrc |-->| decodebin |-->| tee |--|
-----------------   -------------   -------   \    ---------   ----------------   ---------    ------------
-                                              \-->| queue |-->| videoconvert |-->| pngenc |-->| filesink |
-                                                  ---------   ----------------   ----------   ------------
+----------------   --------------
+| videotestsrc |-->| ximagesink |
+----------------   --------------
 ```
+
+Basically, We use the `last-sample` property of `ximagesink` to get a `GstSample`.
+This sample is converted in the desired format, using `gst_video_convert_sample`.
+Then, the converted sample is written into a `QImage`
