@@ -7,8 +7,7 @@
 QT += core gui widgets
 CONFIG += no_keywords
 CONFIG += link_pkgconfig
-PKGCONFIG += Qt5GStreamer-1.0
-LIBS += -lQt5GStreamer-1.0 -lQt5GStreamerUi-1.0
+PKGCONFIG += Qt5GStreamer-1.0 gstreamer-1.0
 
 TARGET = QtGStreamerSnapshotTakerExample
 TEMPLATE = app
