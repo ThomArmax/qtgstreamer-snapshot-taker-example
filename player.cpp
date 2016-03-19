@@ -37,6 +37,8 @@
 
 #include <glib-object.h>
 #include <gst/gstsample.h>
+#include <gst/gstcaps.h>
+#include <gst/video/video.h>
 
 Player::Player(QWidget *parent) :
     QGst::Ui::VideoWidget(parent)
@@ -90,39 +92,66 @@ void Player::takeSnapshot()
     QDateTime currentDate = QDateTime::currentDateTime();
     QString location = QString("%1/snap_%2.png").arg(QDir::homePath()).arg(currentDate.toString(Qt::ISODate));
     QImage snapShot;
+    QImage::Format snapFormat;
     QGlib::Value val = m_videoSink->property("last-sample");
     GstSample *videoSample = (GstSample *)g_value_get_boxed(val);
     QGst::SamplePtr sample = QGst::SamplePtr::wrap(videoSample);
-    QGst::BufferPtr buffer = sample->buffer();
+    QGst::SamplePtr convertedSample;
+    QGst::BufferPtr buffer;
     QGst::CapsPtr caps = sample->caps();
     QGst::MapInfo mapInfo;
+    GError *err = NULL;
+    GstCaps * capsTo = NULL;
     const QGst::StructurePtr structure = caps->internalStructure(0);
     int width, height;
 
     width = structure.data()->value("width").get<int>();
     height = structure.data()->value("height").get<int>();
 
-    qDebug() << "We've got a caps in here" << structure.data()->toString();
-    qDebug() << "Size   :" << width << "x" << height;
-    qDebug() << "Name   :" << qPrintable(structure.data()->name());
-    qDebug() << "Format :" << qPrintable(structure.data()->value("format").toString());
-    qDebug() << "BPP    :" << structure.data()->value("bpp").get<int>();
+    qDebug() << "Sample caps:" << structure.data()->toString();
 
-    buffer->map(mapInfo, QGst::MapRead);
+    /*
+     * { QImage::Format_RGBX8888, GST_VIDEO_FORMAT_RGBx  },
+     * { QImage::Format_RGBA8888, GST_VIDEO_FORMAT_RGBA  },
+     * { QImage::Format_RGB888  , GST_VIDEO_FORMAT_RGB   },
+     * { QImage::Format_RGB16   , GST_VIDEO_FORMAT_RGB16 }
+     */
+    snapFormat = QImage::Format_RGB888;
+    capsTo = gst_caps_new_simple("video/x-raw",
+                                 "format", G_TYPE_STRING, "RGB",
+                                 "width", G_TYPE_INT, width,
+                                 "height", G_TYPE_INT, height,
+                                 NULL);
 
-    snapShot = QImage((const uchar *)mapInfo.data(),
-                 width,
-                 height,
-                 QImage::Format_ARGB32);
+    convertedSample = QGst::SamplePtr::wrap(gst_video_convert_sample(videoSample, capsTo, GST_SECOND, &err));
+    if (convertedSample.isNull()) {
+        qWarning() << "gst_video_convert_sample Failed:" << err->message;
+    }
+    else {
+        qDebug() << "Converted sample caps:" << convertedSample->caps()->toString();
 
-    qDebug() << "saving snap to" << location;
-    snapShot.save(location);
+        buffer = convertedSample->buffer();
+        buffer->map(mapInfo, QGst::MapRead);
 
-    buffer->unmap(mapInfo);
+        snapShot = QImage((const uchar *)mapInfo.data(),
+                          width,
+                          height,
+                          snapFormat);
+
+        qDebug() << "Saving snap to" << location;
+        snapShot.save(location);
+
+        buffer->unmap(mapInfo);
+    }
+
     val.clear();
     sample.clear();
+    convertedSample.clear();
     buffer.clear();
     caps.clear();
+    g_clear_error(&err);
+    if (capsTo)
+        gst_caps_unref(capsTo);
 }
 
 /***************************************************************************/
