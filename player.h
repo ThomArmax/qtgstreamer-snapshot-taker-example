@@ -42,21 +42,11 @@ public Q_SLOTS:
 private:
     void onBusMessage(const QGst::MessagePtr & message);
     void handlePipelineStateChange(const QGst::StateChangedMessagePtr & scm);
-    void onPaddedAdded(QGst::PadPtr newPad);
 
 private:
      QGst::PipelinePtr m_pipeline;
      QGst::ElementPtr m_source;
-     QGst::ElementPtr m_decoder;
-     QGst::ElementPtr m_snapConverter;
-     QGst::ElementPtr m_tee;
-     QGst::ElementPtr m_videoQueue;
-     QGst::ElementPtr m_snapQueue;
      QGst::ElementPtr m_videoSink;
-     QGst::ElementPtr m_snapEncoder;
-     QGst::ElementPtr m_snapSink;
-     QGst::PadPtr     m_videoTeeSrcPad;
-     QGst::PadPtr     m_snapTeeSrcPad;
 };
 
 #endif // PLAYER_H

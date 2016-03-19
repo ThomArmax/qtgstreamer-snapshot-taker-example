@@ -22,13 +22,23 @@
  * SOFTWARE.
  */
 #include "player.h"
+#include <QDir>
+
 #include <QGlib/Connect>
 #include <QGlib/Error>
 #include <QGst/Pipeline>
 #include <QGst/ElementFactory>
 #include <QGst/Bus>
 #include <QGst/Message>
+#include <QGst/ClockTime>
+#include <QGst/Sample>
+#include <QGst/Buffer>
 #include <QMessageBox>
+
+#include <glib-object.h>
+#include <gst/gstsample.h>
+#include <gst/gstcaps.h>
+#include <gst/video/video.h>
 
 Player::Player(QWidget *parent) :
     QGst::Ui::VideoWidget(parent)
@@ -36,17 +46,9 @@ Player::Player(QWidget *parent) :
     // Create gstreamer elements
     m_pipeline      = QGst::Pipeline::create("Video Player + Snapshots pipelin");
     m_source        = QGst::ElementFactory::make("videotestsrc", "videotestsrc");
-    m_decoder       = QGst::ElementFactory::make("decodebin", "decodebin");
-    m_tee           = QGst::ElementFactory::make("tee", "video-tee");
-    m_videoQueue    = QGst::ElementFactory::make("queue", "video-queue");
-    m_videoSink     = QGst::ElementFactory::make("autovideosink", "video-sink");
-    m_snapQueue     = QGst::ElementFactory::make("queue", "snap-queue");
-    m_snapConverter = QGst::ElementFactory::make("videoconvert", "snap-converter");
-    m_snapEncoder   = QGst::ElementFactory::make("pngenc", "snap-encoder");
-    m_snapSink      = QGst::ElementFactory::make("filesink", "snap-filesink");
+    m_videoSink     = QGst::ElementFactory::make("ximagesink", "video-sink");
 
-    if (!m_pipeline || !m_source || !m_decoder || !m_tee || !m_videoQueue || !m_videoSink ||
-        !m_snapQueue || !m_snapConverter  || !m_snapEncoder || !m_snapSink) {
+    if (!m_pipeline || !m_source || !m_videoSink) {
         QMessageBox::critical(
                     this,
                     "Error",
@@ -55,15 +57,14 @@ Player::Player(QWidget *parent) :
         return;
     }
 
-    // Set the snapshot property of png-enc
-    m_snapEncoder->setProperty("snapshot", false);
+    m_videoSink->setProperty("enable-last-sample", true);
 
     // Add elements to pipeline
     m_pipeline->add(m_source);
-    m_pipeline->add(m_decoder);
+    m_pipeline->add(m_videoSink);
 
     // Link elements
-    m_source->link(m_decoder);
+    m_source->link(m_videoSink);
 
     watchPipeline(m_pipeline);
     setAutoFillBackground(true);
@@ -73,9 +74,6 @@ Player::Player(QWidget *parent) :
     bus->addSignalWatch();
     QGlib::connect(bus, "message", this, &Player::onBusMessage);
     bus.clear();
-
-    // Connect on 'pad-added' signal
-    QGlib::connect(m_decoder, "pad-added", this, &Player::onPaddedAdded);
 
     m_pipeline->setState(QGst::StatePlaying);
 }
@@ -91,33 +89,69 @@ Player::~Player()
 
 void Player::takeSnapshot()
 {
-    QDateTime dateTime = QDateTime::currentDateTime();
-    QString snapLocation = QString("/tmp/snap_%1.png").arg(dateTime.toString(Qt::ISODate));
+    QDateTime currentDate = QDateTime::currentDateTime();
+    QString location = QString("%1/snap_%2.png").arg(QDir::homePath()).arg(currentDate.toString(Qt::ISODate));
+    QImage snapShot;
+    QImage::Format snapFormat;
+    QGlib::Value val = m_videoSink->property("last-sample");
+    GstSample *videoSample = (GstSample *)g_value_get_boxed(val);
+    QGst::SamplePtr sample = QGst::SamplePtr::wrap(videoSample);
+    QGst::SamplePtr convertedSample;
+    QGst::BufferPtr buffer;
+    QGst::CapsPtr caps = sample->caps();
+    QGst::MapInfo mapInfo;
+    GError *err = NULL;
+    GstCaps * capsTo = NULL;
+    const QGst::StructurePtr structure = caps->internalStructure(0);
+    int width, height;
 
-    // Stop the snapshot branch
-    m_snapQueue->setState(QGst::StateNull);
-    m_snapConverter->setState(QGst::StateNull);
-    m_snapEncoder->setState(QGst::StateNull);
-    m_snapSink->setState(QGst::StateNull);
+    width = structure.data()->value("width").get<int>();
+    height = structure.data()->value("height").get<int>();
 
-    // Set the snapshot location property
-    m_snapSink->setProperty("location", snapLocation);
+    qDebug() << "Sample caps:" << structure.data()->toString();
 
-    // Check if we are linked
-    if (!m_snapTeeSrcPad->isLinked())
-        m_snapTeeSrcPad->link(m_snapQueue->getStaticPad("sink"));
+    /*
+     * { QImage::Format_RGBX8888, GST_VIDEO_FORMAT_RGBx  },
+     * { QImage::Format_RGBA8888, GST_VIDEO_FORMAT_RGBA  },
+     * { QImage::Format_RGB888  , GST_VIDEO_FORMAT_RGB   },
+     * { QImage::Format_RGB16   , GST_VIDEO_FORMAT_RGB16 }
+     */
+    snapFormat = QImage::Format_RGB888;
+    capsTo = gst_caps_new_simple("video/x-raw",
+                                 "format", G_TYPE_STRING, "RGB",
+                                 "width", G_TYPE_INT, width,
+                                 "height", G_TYPE_INT, height,
+                                 NULL);
 
-    // Unlock snapshot branch
-    m_snapQueue->setStateLocked(false);
-    m_snapConverter->setStateLocked(false);
-    m_snapEncoder->setStateLocked(false);
-    m_snapSink->setStateLocked(false);
+    convertedSample = QGst::SamplePtr::wrap(gst_video_convert_sample(videoSample, capsTo, GST_SECOND, &err));
+    if (convertedSample.isNull()) {
+        qWarning() << "gst_video_convert_sample Failed:" << err->message;
+    }
+    else {
+        qDebug() << "Converted sample caps:" << convertedSample->caps()->toString();
 
-    // Synch snapshot branch state with parent
-    m_snapQueue->syncStateWithParent();
-    m_snapConverter->syncStateWithParent();
-    m_snapEncoder->syncStateWithParent();
-    m_snapSink->syncStateWithParent();
+        buffer = convertedSample->buffer();
+        buffer->map(mapInfo, QGst::MapRead);
+
+        snapShot = QImage((const uchar *)mapInfo.data(),
+                          width,
+                          height,
+                          snapFormat);
+
+        qDebug() << "Saving snap to" << location;
+        snapShot.save(location);
+
+        buffer->unmap(mapInfo);
+    }
+
+    val.clear();
+    sample.clear();
+    convertedSample.clear();
+    buffer.clear();
+    caps.clear();
+    g_clear_error(&err);
+    if (capsTo)
+        gst_caps_unref(capsTo);
 }
 
 /***************************************************************************/
@@ -139,56 +173,6 @@ void Player::onBusMessage(const QGst::MessagePtr &message)
         break;
     default:
         break;
-    }
-}
-
-void Player::onPaddedAdded(QGst::PadPtr newPad)
-{
-    QGst::CapsPtr caps = newPad->currentCaps();
-    qDebug() << "Received" << caps->toString() << "caps";
-
-    if (caps->toString().startsWith("video/x-raw")) {
-        // Request src pads to Tee
-        m_videoTeeSrcPad = m_tee->getRequestPad("src_%u");
-        m_snapTeeSrcPad = m_tee->getRequestPad("src_%u");
-        m_videoTeeSrcPad->setName("video-tee-src-pad");
-        m_snapTeeSrcPad->setName("snap-tee-src-pad");
-
-        // Add video elements into the pipeline
-        m_pipeline->add(m_tee);
-        m_pipeline->add(m_videoQueue);
-        m_pipeline->add(m_videoSink);
-
-        // Link video elements
-        m_videoQueue->link(m_videoSink);
-
-        // Add snapshot elements into the pipeline
-        m_pipeline->add(m_snapQueue);
-        m_pipeline->add(m_snapConverter);
-        m_pipeline->add(m_snapEncoder);
-        m_pipeline->add(m_snapSink);
-
-        // Link snapshot elements
-        m_snapQueue->link(m_snapConverter);
-        m_snapConverter->link(m_snapEncoder);
-        m_snapEncoder->link(m_snapSink);
-
-        // Lock snapshot branch
-        m_snapQueue->setStateLocked(true);
-        m_snapConverter->setStateLocked(true);
-        m_snapEncoder->setStateLocked(true);
-        m_snapSink->setStateLocked(true);
-
-        // Set the video branch to PLAYING state
-        m_tee->setState(QGst::StatePlaying);
-        m_videoQueue->setState(QGst::StatePlaying);
-        m_videoSink->setState(QGst::StatePlaying);
-
-        // Link tee' src pad to video queue sink pad
-        m_videoTeeSrcPad->link(m_videoQueue->getStaticPad("sink"));
-
-        // Link received pad to tee' sink pad
-        newPad->link(m_tee->getStaticPad("sink"));
     }
 }
 
